@@ -1,0 +1,14 @@
+[project]
+name = "road-risk-ml"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "hopsworks[python]==4.6.*",
+    "pandas>=2.1.4",
+    "pyarrow>=22.0.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+]
