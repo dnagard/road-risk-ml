@@ -1,0 +1,28 @@
+[project]
+name = "road-risk-ml"
+version = "0.1.0"
+description = "ML model to predict hazardous road conditions for Stockholm roads, helping municipalities plan maintenance actions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "hopsworks[python]==4.6.*",
+    "matplotlib>=3.10.0",
+    "numpy>=1.26.4",
+    "pandas>=2.1.4",
+    "plotly>=6.0.0",
+    "pyarrow>=15.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "requests-cache>=1.1.0",
+    "retry-requests>=2.0.0",
+    "scikit-learn>=1.4.0",
+    "streamlit>=1.30.0",
+    "xgboost>=2.0.0",
+    "geopy>=2.4.0",
+]
+
+[project.scripts]
+daily-feature-pipeline = "scripts.daily_feature_pipeline:main"
+training-pipeline = "scripts.training_pipeline:main"
+batch-inference-pipeline = "scripts.batch_inference_pipeline:main"

@@ -1,0 +1,7 @@
+{
+    "MP001": {"id": "MP001", "name": "E4 Norrtull", "road": "E4", "latitude": 59.357, "longitude": 18.05, "municipality": "Stockholm"},
+    "MP002": {"id": "MP002", "name": "E4 Häggvik", "road": "E4", "latitude": 59.433, "longitude": 17.933, "municipality": "Sollentuna"},
+    "MP003": {"id": "MP003", "name": "E18 Jakobsberg", "road": "E18", "latitude": 59.422, "longitude": 17.833, "municipality": "Järfälla"},
+    "MP004": {"id": "MP004", "name": "E20 Essingeleden", "road": "E20", "latitude": 59.327, "longitude": 18.0, "municipality": "Stockholm"},
+    "MP005": {"id": "MP005", "name": "Rv73 Nynäsvägen", "road": "Rv73", "latitude": 59.267, "longitude": 18.083, "municipality": "Stockholm"}
+}
