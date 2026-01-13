@@ -4,6 +4,9 @@ Trains calibrated ensemble XGBoost classifiers to forecast hazardous road
 conditions 24/48/72 hours ahead using SMHI forecast features and observed
 Trafikverket outcomes.
 """
+# Test plan:
+# 1) uv run python scripts/training_pipeline.py
+# 2) Confirm smhi_point_forecast v3 + tv_weather_observation v1 load and merge without dtype errors.
 import json
 import os
 import sys
@@ -23,12 +26,15 @@ from xgboost import XGBClassifier
 
 from src.settings import settings
 from src.feature_store import get_project
+from src.utils import to_datetime64ns_utc
 
 HORIZONS = [24, 48, 72]
 ENSEMBLE_SIZE = int(os.getenv("ENSEMBLE_SIZE", "10"))
 TEST_DAYS = int(os.getenv("TEST_DAYS", "14"))
 CALIBRATION_DAYS = int(os.getenv("CALIBRATION_DAYS", "7"))
 CALIBRATION_METHOD = os.getenv("CALIBRATION_METHOD", "platt")
+
+LOCATIONS_FILE = Path(__file__).parent.parent / "src" / "locations.json"
 
 FORECAST_FEATURES = [
     "t_air_c",
@@ -47,10 +53,29 @@ TEMPORAL_FEATURES = [
     "is_rush_hour",
     "is_weekend",
 ]
+OBS_FEATURES = [
+    "obs_surface_temp_c",
+    "obs_surface_grip",
+    "obs_air_temp_c",
+    "obs_air_rh",
+    "obs_dewpoint_c",
+    "obs_surface_ice",
+    "obs_surface_snow",
+    "obs_surface_water",
+    "obs_age_minutes",
+]
+
+
+def load_locations() -> dict:
+    try:
+        with open(LOCATIONS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def to_utc_naive(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, utc=True, errors="coerce").dt.tz_convert(None)
+    return to_datetime64ns_utc(series)
 
 
 def add_temporal_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
@@ -62,6 +87,146 @@ def add_temporal_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
     df["is_rush_hour"] = ts.dt.hour.isin([7, 8, 9, 16, 17, 18]).astype(int)
     df["is_weekend"] = (ts.dt.dayofweek >= 5).astype(int)
     return df
+
+
+def coerce_measurepoint_id(df: pd.DataFrame, col: str = "measurepoint_id") -> pd.DataFrame:
+    df = df.copy()
+    if col not in df.columns or df.empty:
+        return df
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df[df[col].notna()]
+    df[col] = df[col].astype(int)
+    return df
+
+
+def build_current_obs_features(obs_df: pd.DataFrame) -> pd.DataFrame:
+    if obs_df.empty:
+        return obs_df
+
+    obs_df = obs_df.copy()
+    if "sample_time" not in obs_df.columns:
+        return pd.DataFrame()
+
+    obs_df = coerce_measurepoint_id(obs_df)
+    if obs_df.empty:
+        return obs_df
+
+    obs_df["sample_time"] = to_datetime64ns_utc(obs_df["sample_time"])
+
+    def _to_bool_int(series: pd.Series) -> pd.Series:
+        mapped = series.map(
+            {True: 1, False: 0, "true": 1, "false": 0, "True": 1, "False": 0, 1: 1, 0: 0}
+        )
+        numeric = pd.to_numeric(series, errors="coerce")
+        combined = mapped.combine_first(numeric)
+        return combined.fillna(0).astype(int)
+
+    for col in ["surface_ice", "surface_snow", "surface_water"]:
+        if col in obs_df.columns:
+            obs_df[col] = _to_bool_int(obs_df[col])
+
+    required = [
+        "surface_temp_c",
+        "surface_grip",
+        "air_temp_c",
+        "air_rh",
+        "dewpoint_c",
+        "surface_ice",
+        "surface_snow",
+        "surface_water",
+    ]
+    for col in required:
+        if col not in obs_df.columns:
+            obs_df[col] = np.nan
+        else:
+            obs_df[col] = pd.to_numeric(obs_df[col], errors="coerce")
+
+    keep_cols = ["measurepoint_id", "sample_time"] + required
+    return obs_df[keep_cols]
+
+
+def attach_current_obs_features(fc_df: pd.DataFrame, obs_df: pd.DataFrame) -> pd.DataFrame:
+    fc_df = fc_df.copy()
+    if obs_df.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    fc_df = coerce_measurepoint_id(fc_df)
+    if fc_df.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    obs_features = build_current_obs_features(obs_df)
+    if obs_features.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    if "forecast_run_time" not in fc_df.columns:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    fc_df["forecast_run_time"] = to_datetime64ns_utc(fc_df["forecast_run_time"])
+    obs_features["sample_time"] = to_datetime64ns_utc(obs_features["sample_time"])
+
+    print(
+        "  Obs join dtypes:",
+        f"forecast_run_time={fc_df['forecast_run_time'].dtype},",
+        f"sample_time={obs_features['sample_time'].dtype}",
+    )
+    print(
+        "  Forecast time range:",
+        f"{fc_df['forecast_run_time'].min()} -> {fc_df['forecast_run_time'].max()}",
+    )
+    print(
+        "  Observation time range:",
+        f"{obs_features['sample_time'].min()} -> {obs_features['sample_time'].max()}",
+    )
+
+    assert fc_df["forecast_run_time"].dtype == obs_features["sample_time"].dtype
+
+    fc_df = fc_df.sort_values(["measurepoint_id", "forecast_run_time"]).reset_index(drop=True)
+    obs_features = obs_features.sort_values(["measurepoint_id", "sample_time"]).reset_index(drop=True)
+    print("  Sorted forecast and observation tables for merge_asof")
+
+    merged = pd.merge_asof(
+        fc_df,
+        obs_features,
+        left_on="forecast_run_time",
+        right_on="sample_time",
+        by="measurepoint_id",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+
+    rename_map = {
+        "surface_temp_c": "obs_surface_temp_c",
+        "surface_grip": "obs_surface_grip",
+        "air_temp_c": "obs_air_temp_c",
+        "air_rh": "obs_air_rh",
+        "dewpoint_c": "obs_dewpoint_c",
+        "surface_ice": "obs_surface_ice",
+        "surface_snow": "obs_surface_snow",
+        "surface_water": "obs_surface_water",
+        "sample_time": "obs_time",
+    }
+    merged = merged.rename(columns=rename_map)
+    merged["obs_age_minutes"] = (
+        (merged["forecast_run_time"] - merged["obs_time"]).dt.total_seconds() / 60.0
+    )
+    merged["obs_age_minutes"] = merged["obs_age_minutes"].fillna(1e6)
+    return merged
 
 
 def create_hazard_labels(df: pd.DataFrame) -> pd.DataFrame:
@@ -104,7 +269,9 @@ def build_label_table(obs_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_training_dataset(fs) -> pd.DataFrame:
     try:
-        fc_fg = fs.get_feature_group(name="smhi_point_forecast", version=1)
+        print("  Reading FG smhi_point_forecast v3")
+        fc_fg = fs.get_feature_group(name="smhi_point_forecast", version=3)
+        print("  Reading FG tv_weather_observation v1")
         obs_fg = fs.get_feature_group(name="tv_weather_observation", version=1)
         fc_df = fc_fg.read()
         obs_df = obs_fg.read()
@@ -115,6 +282,12 @@ def build_training_dataset(fs) -> pd.DataFrame:
 
     if fc_df.empty or obs_df.empty:
         print("  ✗ Feature groups are empty")
+        return pd.DataFrame()
+
+    fc_df = coerce_measurepoint_id(fc_df)
+    obs_df = coerce_measurepoint_id(obs_df)
+    if fc_df.empty or obs_df.empty:
+        print("  ✗ Feature groups are empty after ID normalization")
         return pd.DataFrame()
 
     fc_df = fc_df.copy()
@@ -138,6 +311,11 @@ def build_training_dataset(fs) -> pd.DataFrame:
         print("  ✗ No forecast rows matched requested horizons")
         return pd.DataFrame()
 
+    fc_df = attach_current_obs_features(fc_df, obs_df)
+    if "obs_time" in fc_df.columns:
+        attached = int(fc_df["obs_time"].notna().sum())
+        print(f"  ✓ Attached current observations to {attached} forecast rows")
+
     label_df = build_label_table(obs_df)
 
     merged = fc_df.merge(label_df, on=["measurepoint_id", "valid_time"], how="inner")
@@ -153,13 +331,20 @@ def build_training_dataset(fs) -> pd.DataFrame:
 def create_synthetic_training_data(days: int = 45) -> pd.DataFrame:
     np.random.seed(42)
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    locations = load_locations()
     measurepoints = [
-        ("MP001", 59.357, 18.05),
-        ("MP002", 59.433, 17.933),
-        ("MP003", 59.422, 17.833),
-        ("MP004", 59.327, 18.0),
-        ("MP005", 59.267, 18.083),
+        (int(info["tv_measurepoint_id"]), info["latitude"], info["longitude"])
+        for info in locations.values()
+        if info.get("tv_measurepoint_id") is not None
     ]
+    if not measurepoints:
+        measurepoints = [
+            (243, 59.357, 18.05),
+            (226, 59.433, 17.933),
+            (232, 59.422, 17.833),
+            (237, 59.327, 18.0),
+            (215, 59.267, 18.083),
+        ]
 
     rows = []
     for mp_id, lat, lon in measurepoints:
@@ -176,6 +361,13 @@ def create_synthetic_training_data(days: int = 45) -> pd.DataFrame:
                     wind_ms = max(0, np.random.normal(4, 2))
                     rh = np.clip(70 + np.random.normal(0, 15), 20, 100)
 
+                    obs_air_temp_c = t_air_c + np.random.normal(0, 0.8)
+                    obs_surface_temp_c = obs_air_temp_c - np.random.uniform(0, 2)
+                    obs_surface_ice = int(obs_surface_temp_c < 0 and np.random.random() > 0.3)
+                    obs_surface_snow = int(obs_surface_temp_c < -1 and np.random.random() > 0.5)
+                    obs_surface_water = int(np.random.random() > 0.8)
+                    obs_surface_grip = np.clip(0.85 - obs_surface_ice * 0.35 - obs_surface_snow * 0.2, 0.1, 1.0)
+
                     hazard = int((t_air_c < 0 and precip_mm > 0.1) or rh > 85)
 
                     rows.append(
@@ -190,6 +382,15 @@ def create_synthetic_training_data(days: int = 45) -> pd.DataFrame:
                             "precip_mm": precip_mm,
                             "wind_ms": wind_ms,
                             "rh": rh,
+                            "obs_surface_temp_c": obs_surface_temp_c,
+                            "obs_surface_grip": obs_surface_grip,
+                            "obs_air_temp_c": obs_air_temp_c,
+                            "obs_air_rh": np.clip(rh + np.random.normal(0, 5), 20, 100),
+                            "obs_dewpoint_c": obs_air_temp_c - 5 + np.random.normal(0, 1),
+                            "obs_surface_ice": obs_surface_ice,
+                            "obs_surface_snow": obs_surface_snow,
+                            "obs_surface_water": obs_surface_water,
+                            "obs_age_minutes": np.random.randint(0, 180),
                             "hazard": hazard,
                         }
                     )
@@ -378,11 +579,11 @@ def main():
         print("  Using synthetic training data...")
         df = create_synthetic_training_data(days=45)
 
-    features_all = FORECAST_FEATURES + STATIC_FEATURES + TEMPORAL_FEATURES
+    features_all = FORECAST_FEATURES + STATIC_FEATURES + TEMPORAL_FEATURES + OBS_FEATURES
     available_features = [c for c in features_all if c in df.columns]
     print(f"  Using features: {available_features}")
 
-    df = df.dropna(subset=available_features + ["hazard", "horizon_hours"])
+    df = df.dropna(subset=["hazard", "horizon_hours"])
 
     model_root = Path("road_risk_models")
     model_root.mkdir(parents=True, exist_ok=True)

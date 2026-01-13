@@ -3,6 +3,9 @@
 Generates calibrated hazard forecasts for 24/48/72 hour horizons using
 SMHI point forecasts and trained ensembles.
 """
+# Test plan:
+# 1) uv run python scripts/batch_inference_pipeline.py
+# 2) Verify road_risk_predictions v3 insert and numeric measurepoint_id.
 import json
 import sys
 from datetime import datetime, timedelta
@@ -17,12 +20,24 @@ import pandas as pd
 from xgboost import XGBClassifier
 
 from src.settings import settings
-from src.feature_store import get_project
+from src.feature_store import get_project, get_or_create_fg, insert_fg
 from src.clients import SMHIForecastClient
 from src.transforms import extract_smhi_point_forecast
+from src.utils import to_datetime64ns_utc
 
 HORIZONS = [24, 48, 72]
 LOCATIONS_FILE = Path(__file__).parent.parent / "src" / "locations.json"
+OBS_FEATURES = [
+    "obs_surface_temp_c",
+    "obs_surface_grip",
+    "obs_air_temp_c",
+    "obs_air_rh",
+    "obs_dewpoint_c",
+    "obs_surface_ice",
+    "obs_surface_snow",
+    "obs_surface_water",
+    "obs_age_minutes",
+]
 
 
 def load_locations() -> dict:
@@ -34,7 +49,7 @@ def load_locations() -> dict:
 
 
 def to_utc_naive(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, utc=True, errors="coerce").dt.tz_convert(None)
+    return to_datetime64ns_utc(series)
 
 
 def add_temporal_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
@@ -46,6 +61,146 @@ def add_temporal_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
     df["is_rush_hour"] = ts.dt.hour.isin([7, 8, 9, 16, 17, 18]).astype(int)
     df["is_weekend"] = (ts.dt.dayofweek >= 5).astype(int)
     return df
+
+
+def coerce_measurepoint_id(df: pd.DataFrame, col: str = "measurepoint_id") -> pd.DataFrame:
+    df = df.copy()
+    if col not in df.columns or df.empty:
+        return df
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df[df[col].notna()]
+    df[col] = df[col].astype(int)
+    return df
+
+
+def build_current_obs_features(obs_df: pd.DataFrame) -> pd.DataFrame:
+    if obs_df.empty:
+        return obs_df
+
+    obs_df = obs_df.copy()
+    if "sample_time" not in obs_df.columns:
+        return pd.DataFrame()
+
+    obs_df = coerce_measurepoint_id(obs_df)
+    if obs_df.empty:
+        return obs_df
+
+    obs_df["sample_time"] = to_datetime64ns_utc(obs_df["sample_time"])
+
+    def _to_bool_int(series: pd.Series) -> pd.Series:
+        mapped = series.map(
+            {True: 1, False: 0, "true": 1, "false": 0, "True": 1, "False": 0, 1: 1, 0: 0}
+        )
+        numeric = pd.to_numeric(series, errors="coerce")
+        combined = mapped.combine_first(numeric)
+        return combined.fillna(0).astype(int)
+
+    for col in ["surface_ice", "surface_snow", "surface_water"]:
+        if col in obs_df.columns:
+            obs_df[col] = _to_bool_int(obs_df[col])
+
+    required = [
+        "surface_temp_c",
+        "surface_grip",
+        "air_temp_c",
+        "air_rh",
+        "dewpoint_c",
+        "surface_ice",
+        "surface_snow",
+        "surface_water",
+    ]
+    for col in required:
+        if col not in obs_df.columns:
+            obs_df[col] = np.nan
+        else:
+            obs_df[col] = pd.to_numeric(obs_df[col], errors="coerce")
+
+    keep_cols = ["measurepoint_id", "sample_time"] + required
+    return obs_df[keep_cols]
+
+
+def attach_current_obs_features(fc_df: pd.DataFrame, obs_df: pd.DataFrame) -> pd.DataFrame:
+    fc_df = fc_df.copy()
+    if obs_df.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    fc_df = coerce_measurepoint_id(fc_df)
+    if fc_df.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    obs_features = build_current_obs_features(obs_df)
+    if obs_features.empty:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    if "forecast_run_time" not in fc_df.columns:
+        for col in OBS_FEATURES:
+            fc_df[col] = np.nan
+        fc_df["obs_time"] = pd.NaT
+        fc_df["obs_age_minutes"] = 1e6
+        return fc_df
+
+    fc_df["forecast_run_time"] = to_datetime64ns_utc(fc_df["forecast_run_time"])
+    obs_features["sample_time"] = to_datetime64ns_utc(obs_features["sample_time"])
+
+    print(
+        "  Obs join dtypes:",
+        f"forecast_run_time={fc_df['forecast_run_time'].dtype},",
+        f"sample_time={obs_features['sample_time'].dtype}",
+    )
+    print(
+        "  Forecast time range:",
+        f"{fc_df['forecast_run_time'].min()} -> {fc_df['forecast_run_time'].max()}",
+    )
+    print(
+        "  Observation time range:",
+        f"{obs_features['sample_time'].min()} -> {obs_features['sample_time'].max()}",
+    )
+
+    assert fc_df["forecast_run_time"].dtype == obs_features["sample_time"].dtype
+
+    fc_df = fc_df.sort_values(["measurepoint_id", "forecast_run_time"]).reset_index(drop=True)
+    obs_features = obs_features.sort_values(["measurepoint_id", "sample_time"]).reset_index(drop=True)
+    print("  Sorted forecast and observation tables for merge_asof")
+
+    merged = pd.merge_asof(
+        fc_df,
+        obs_features,
+        left_on="forecast_run_time",
+        right_on="sample_time",
+        by="measurepoint_id",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+
+    rename_map = {
+        "surface_temp_c": "obs_surface_temp_c",
+        "surface_grip": "obs_surface_grip",
+        "air_temp_c": "obs_air_temp_c",
+        "air_rh": "obs_air_rh",
+        "dewpoint_c": "obs_dewpoint_c",
+        "surface_ice": "obs_surface_ice",
+        "surface_snow": "obs_surface_snow",
+        "surface_water": "obs_surface_water",
+        "sample_time": "obs_time",
+    }
+    merged = merged.rename(columns=rename_map)
+    merged["obs_age_minutes"] = (
+        (merged["forecast_run_time"] - merged["obs_time"]).dt.total_seconds() / 60.0
+    )
+    merged["obs_age_minutes"] = merged["obs_age_minutes"].fillna(1e6)
+    return merged
 
 
 def apply_calibrator(calibrator, probs: np.ndarray, method: str) -> np.ndarray:
@@ -113,9 +268,13 @@ def fetch_smhi_forecasts(locations: dict) -> pd.DataFrame:
     for loc_id, loc_info in locations.items():
         lat = loc_info["latitude"]
         lon = loc_info["longitude"]
+        tv_id = loc_info.get("tv_measurepoint_id")
+        if tv_id is None:
+            print(f"  ✗ {loc_info.get('name', loc_id)}: missing tv_measurepoint_id")
+            continue
         try:
             payload = smhi.get_point_forecast(lat, lon)
-            df = extract_smhi_point_forecast(payload, lat, lon, measurepoint_id=loc_id)
+            df = extract_smhi_point_forecast(payload, lat, lon, measurepoint_id=tv_id)
             all_dfs.append(df)
             print(f"  ✓ {loc_info['name']}: {len(df)} hours")
         except Exception as e:
@@ -128,6 +287,10 @@ def fetch_smhi_forecasts(locations: dict) -> pd.DataFrame:
 
 def prepare_forecast_features(forecast_df: pd.DataFrame) -> pd.DataFrame:
     df = forecast_df.copy()
+
+    df = coerce_measurepoint_id(df)
+    if df.empty:
+        return df
 
     df["valid_time"] = to_utc_naive(df["valid_time"])
     if "forecast_run_time" in df.columns:
@@ -164,11 +327,12 @@ def create_synthetic_forecast(hours: int = 72) -> pd.DataFrame:
     locations = load_locations()
     rows = []
     for mp_id, mp_info in locations.items():
+        tv_id = mp_info.get("tv_measurepoint_id", mp_id)
         for t in times:
             daily_var = 3 * np.sin((t.hour - 6) * np.pi / 12)
             rows.append(
                 {
-                    "measurepoint_id": mp_id,
+                    "measurepoint_id": tv_id,
                     "lat": mp_info["latitude"],
                     "lon": mp_info["longitude"],
                     "forecast_run_time": run_time,
@@ -253,6 +417,28 @@ def main():
         forecast_df = create_synthetic_forecast(hours=72)
 
     features_df = prepare_forecast_features(forecast_df)
+    if features_df.empty:
+        print("  ✗ No forecast rows after ID normalization")
+        return
+
+    obs_df = pd.DataFrame()
+    if fs is not None:
+        try:
+            print("\nLoading current observations...")
+            print("  Reading FG tv_weather_observation v1")
+            obs_fg = fs.get_feature_group(name="tv_weather_observation", version=1)
+            obs_df = obs_fg.read()
+            obs_df = coerce_measurepoint_id(obs_df)
+            print(f"  ✓ Loaded {len(obs_df)} observations")
+        except Exception as e:
+            print(f"  WARN: Could not load observations: {e}")
+            obs_df = pd.DataFrame()
+
+    features_df = attach_current_obs_features(features_df, obs_df)
+    if "obs_time" in features_df.columns:
+        attached = int(features_df["obs_time"].notna().sum())
+        print(f"  ✓ Attached current observations to {attached} forecast rows")
+
     features_df = features_df[features_df["horizon_hours"].isin(HORIZONS)]
 
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
@@ -315,14 +501,22 @@ def main():
     print("\nSaving predictions...")
     if fs is not None:
         try:
-            predictions_fg = fs.get_or_create_feature_group(
+            predictions_fg = get_or_create_fg(
+                fs,
                 name="road_risk_predictions",
-                version=1,
+                version=3,
                 primary_key=["measurepoint_id", "forecast_run_time", "valid_time", "horizon_hours"],
                 event_time="valid_time",
-                description="Road hazard forecasts for 24/48/72h horizons",
+                description="Road hazard forecasts for 24/48/72h horizons (numeric measurepoint_id).",
+                online_enabled=False,
             )
-            predictions_fg.insert(output_df, write_options={"wait_for_job": True})
+            print("  Writing FG road_risk_predictions v3")
+            insert_fg(
+                predictions_fg,
+                output_df,
+                dedup_keys=["measurepoint_id", "forecast_run_time", "valid_time", "horizon_hours"],
+                wait=True,
+            )
             print("  ✓ Predictions saved to Hopsworks feature store")
         except Exception as e:
             print(f"  ✗ Could not save to Hopsworks: {e}")
