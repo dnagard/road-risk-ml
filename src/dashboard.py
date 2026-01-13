@@ -1,5 +1,7 @@
 """Road Risk ML - Streamlit Dashboard"""
 from datetime import datetime, timedelta
+from pathlib import Path
+import json
 import hopsworks
 import pandas as pd
 import numpy as np
@@ -15,13 +17,45 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra='ignore')
 
 
-STOCKHOLM_MEASUREPOINTS = {
-    "MP001": {"name": "E4 Norrtull", "lat": 59.357, "lon": 18.05},
-    "MP002": {"name": "E4 Häggvik", "lat": 59.433, "lon": 17.933},
-    "MP003": {"name": "E18 Jakobsberg", "lat": 59.422, "lon": 17.833},
-    "MP004": {"name": "E20 Essingeleden", "lat": 59.327, "lon": 18.0},
-    "MP005": {"name": "Rv73 Nynäsvägen", "lat": 59.267, "lon": 18.083},
-}
+LOCATIONS_FILE = Path(__file__).parent / "locations.json"
+
+
+def load_locations() -> dict:
+    try:
+        with open(LOCATIONS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def build_measurepoint_map() -> dict:
+    locations = load_locations()
+    points = {}
+    for info in locations.values():
+        tv_id = info.get("tv_measurepoint_id")
+        if tv_id is None:
+            continue
+        points[int(tv_id)] = {
+            "name": info.get("name", str(tv_id)),
+            "lat": info.get("latitude"),
+            "lon": info.get("longitude"),
+            "alias": info.get("id"),
+        }
+
+    if points:
+        return points
+
+    return {
+        243: {"name": "E4 Norrtull", "lat": 59.357, "lon": 18.05, "alias": "MP001"},
+        226: {"name": "E4 Häggvik", "lat": 59.433, "lon": 17.933, "alias": "MP002"},
+        232: {"name": "E18 Jakobsberg", "lat": 59.422, "lon": 17.833, "alias": "MP003"},
+        237: {"name": "E20 Essingeleden", "lat": 59.327, "lon": 18.0, "alias": "MP004"},
+        215: {"name": "Rv73 Nynäsvägen", "lat": 59.267, "lon": 18.083, "alias": "MP005"},
+    }
+
+
+MEASUREPOINTS = build_measurepoint_map()
+ALIAS_TO_TV_ID = {v.get("alias"): k for k, v in MEASUREPOINTS.items() if v.get("alias")}
 
 
 def get_risk_color(risk):
@@ -45,7 +79,7 @@ def load_predictions():
             project=settings.hopsworks_project if settings.hopsworks_project else None,
         )
         fs = project.get_feature_store()
-        pred_fg = fs.get_feature_group(name="road_risk_predictions", version=1)
+        pred_fg = fs.get_feature_group(name="road_risk_predictions", version=3)
         df = pred_fg.read()
     except Exception:
         return create_demo_predictions()
@@ -58,6 +92,10 @@ def load_predictions():
         latest_run = df["forecast_run_time"].max()
         if pd.notna(latest_run):
             df = df[df["forecast_run_time"] == latest_run]
+
+    if "measurepoint_id" in df.columns:
+        df["measurepoint_id"] = df["measurepoint_id"].map(ALIAS_TO_TV_ID).fillna(df["measurepoint_id"])
+        df["measurepoint_id"] = pd.to_numeric(df["measurepoint_id"], errors="coerce")
 
     df["valid_time"] = pd.to_datetime(df["valid_time"], errors="coerce")
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
@@ -80,7 +118,7 @@ def create_demo_predictions():
     np.random.seed(42)
     rows = []
     run_time = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    for mp_id, mp_info in STOCKHOLM_MEASUREPOINTS.items():
+    for mp_id, mp_info in MEASUREPOINTS.items():
         for horizon in [24, 48, 72]:
             valid_time = run_time + timedelta(hours=horizon)
             base_risk = 0.35 + (0.2 if valid_time.hour in [0, 1, 2, 3, 4, 5, 6] else 0)
@@ -106,8 +144,8 @@ def create_risk_map(pred_df):
     fig = go.Figure()
     for _, row in pred_df.iterrows():
         mp_id = row["measurepoint_id"]
-        if mp_id in STOCKHOLM_MEASUREPOINTS:
-            mp = STOCKHOLM_MEASUREPOINTS[mp_id]
+        if mp_id in MEASUREPOINTS:
+            mp = MEASUREPOINTS[mp_id]
             fig.add_trace(
                 go.Scattermapbox(
                     lat=[mp["lat"]],
@@ -165,7 +203,7 @@ def create_timeline(pred_df, mp_id):
     fig.add_hline(y=0.7, line_dash="dash", line_color="red", annotation_text="High")
     fig.add_hline(y=0.4, line_dash="dash", line_color="orange", annotation_text="Medium")
     fig.update_layout(
-        title=f"72h Forecast: {STOCKHOLM_MEASUREPOINTS.get(mp_id, {}).get('name', mp_id)}",
+        title=f"72h Forecast: {MEASUREPOINTS.get(mp_id, {}).get('name', mp_id)}",
         yaxis=dict(title="Risk", range=[0, 1]),
         height=400,
     )
@@ -200,7 +238,7 @@ def main():
 
     st.subheader("📋 Recommendations")
     for _, row in filtered_df.sort_values("risk_mean", ascending=False).iterrows():
-        mp_name = STOCKHOLM_MEASUREPOINTS.get(row["measurepoint_id"], {}).get("name", row["measurepoint_id"])
+        mp_name = MEASUREPOINTS.get(row["measurepoint_id"], {}).get("name", row["measurepoint_id"])
         color = get_risk_color(row["risk_mean"])
         st.markdown(
             f"**{mp_name}** | <span style='color:{color}'>"
@@ -212,8 +250,8 @@ def main():
     st.subheader("📈 Timeline")
     mp = st.selectbox(
         "Segment",
-        list(STOCKHOLM_MEASUREPOINTS.keys()),
-        format_func=lambda x: STOCKHOLM_MEASUREPOINTS[x]["name"],
+        list(MEASUREPOINTS.keys()),
+        format_func=lambda x: MEASUREPOINTS[x]["name"],
     )
     fig = create_timeline(filtered_df, mp)
     if fig:

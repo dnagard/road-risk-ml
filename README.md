@@ -58,13 +58,13 @@ This project implements a serverless ML pipeline that:
 
 The system monitors 5 key road segments in the Stockholm area:
 
-| ID    | Name              | Road  | Coordinates           |
-|-------|-------------------|-------|-----------------------|
-| MP001 | E4 Norrtull       | E4    | 59.357°N, 18.050°E    |
-| MP002 | E4 Häggvik        | E4    | 59.433°N, 17.933°E    |
-| MP003 | E18 Jakobsberg    | E18   | 59.422°N, 17.833°E    |
-| MP004 | E20 Essingeleden  | E20   | 59.327°N, 18.000°E    |
-| MP005 | Rv73 Nynäsvägen   | Rv73  | 59.267°N, 18.083°E    |
+| Alias | TV ID (measurepoint_id) | Name              | Road  | Coordinates           |
+|-------|--------------------------|-------------------|-------|-----------------------|
+| MP001 | 243                      | E4 Norrtull       | E4    | 59.357°N, 18.050°E    |
+| MP002 | 226                      | E4 Häggvik        | E4    | 59.433°N, 17.933°E    |
+| MP003 | 232                      | E18 Jakobsberg    | E18   | 59.422°N, 17.833°E    |
+| MP004 | 237                      | E20 Essingeleden  | E20   | 59.327°N, 18.000°E    |
+| MP005 | 215                      | Rv73 Nynäsvägen   | Rv73  | 59.267°N, 18.083°E    |
 
 ## Installation
 
@@ -139,14 +139,20 @@ The system is designed to run automatically via GitHub Actions:
 
 ## Model
 
-### Features (Forecast-Based)
+### Features (Forecast + Current Observations)
 
-**Numeric Features:**
+**Forecast Features:**
 - `t_air_c`: Air temperature (SMHI forecast)
 - `precip_mm`: Mean precipitation (SMHI forecast)
 - `wind_ms`: Wind speed (SMHI forecast)
 - `rh`: Relative humidity (SMHI forecast)
 - `lat`, `lon`: Measurement point coordinates
+
+**Current Observation Features (latest <= forecast_run_time):**
+- `obs_surface_temp_c`, `obs_surface_grip`
+- `obs_air_temp_c`, `obs_air_rh`, `obs_dewpoint_c`
+- `obs_surface_ice`, `obs_surface_snow`, `obs_surface_water`
+- `obs_age_minutes`
 
 **Temporal Features:**
 - `hour`, `day_of_week`, `month`
@@ -169,20 +175,37 @@ Uncertainty intervals (P10/P90) come from the ensemble distribution.
 
 ## Data Contract
 
+Canonical identifier: `measurepoint_id` is the Trafikverket numeric ID (int) across observations, forecasts, labels, and predictions. `MP001`-style aliases are display-only.
+
 ### tv_weather_observation (v1)
 - Primary keys: `measurepoint_id`, `sample_time`
 - Event time: `sample_time`
 - Core schema: `measurepoint_id`, `sample_time`, `surface_temp_c`, `surface_ice`, `surface_snow`, `surface_grip`, `air_temp_c`, `air_rh`, `dewpoint_c`, `ingested_at`
 
-### smhi_point_forecast (v1)
+### smhi_point_forecast (v3)
 - Primary keys: `measurepoint_id`, `forecast_run_time`, `valid_time`
 - Event time: `valid_time`
-- Core schema: `measurepoint_id`, `forecast_run_time` (SMHI approvedTime), `valid_time`, `t_air_c`, `precip_mm`, `wind_ms`, `rh`, `lat`, `lon`, `ingested_at`
+- Core schema: `measurepoint_id` (int), `forecast_run_time` (SMHI approvedTime), `valid_time`, `t_air_c`, `precip_mm`, `wind_ms`, `rh`, `lat`, `lon`, `ingested_at`
 
-### road_risk_predictions (v1)
+### road_risk_predictions (v3)
 - Primary keys: `measurepoint_id`, `forecast_run_time`, `valid_time`, `horizon_hours`
 - Event time: `valid_time`
-- Core schema: `measurepoint_id`, `forecast_run_time`, `valid_time`, `horizon_hours`, `risk_mean`, `risk_p10`, `risk_p90`, `hazard_predicted`, `recommendation`
+- Core schema: `measurepoint_id` (int), `forecast_run_time`, `valid_time`, `horizon_hours`, `risk_mean`, `risk_p10`, `risk_p90`, `hazard_predicted`, `recommendation`
+
+### Quick dtype check
+
+```python
+import pandas as pd
+from src.feature_store import get_project
+from src.settings import settings
+
+project = get_project(settings.hopsworks_project, settings.hopsworks_api_key, settings.hopsworks_host)
+fs = project.get_feature_store()
+
+fg = fs.get_feature_group(name="smhi_point_forecast", version=3)
+df = fg.read()
+print(df[["measurepoint_id"]].dtypes)
+```
 
 ## Dashboard
 

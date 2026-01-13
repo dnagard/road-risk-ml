@@ -3,6 +3,9 @@
 Fetches current road weather data from Trafikverket and SMHI forecasts,
 then inserts into Hopsworks feature groups.
 """
+# Test plan:
+# 1) uv run python scripts/daily_feature_pipeline.py
+# 2) Verify smhi_point_forecast v3 insert succeeds and logs version.
 import json
 import sys
 from pathlib import Path
@@ -91,9 +94,15 @@ def fetch_smhi_forecasts(smhi: SMHIForecastClient, locations: dict) -> tuple:
     for loc_id, loc_info in locations.items():
         lat = loc_info["latitude"]
         lon = loc_info["longitude"]
+        tv_id = loc_info.get("tv_measurepoint_id")
+        if tv_id is None:
+            msg = f"{loc_id}: missing tv_measurepoint_id"
+            print(f"  ✗ {loc_info.get('name', loc_id)}: {msg}")
+            errors.append(msg)
+            continue
         try:
             payload = smhi.get_point_forecast(lat, lon)
-            df = extract_smhi_point_forecast(payload, lat, lon, measurepoint_id=loc_id)
+            df = extract_smhi_point_forecast(payload, lat, lon, measurepoint_id=tv_id)
             all_dfs.append(df)
             print(f"  ✓ {loc_info['name']}: {len(df)} forecast hours")
         except Exception as e:
@@ -152,6 +161,7 @@ def main():
                 description="Trafikverket road weather observations (rolling retention).",
                 online_enabled=False,
             )
+            print("  Writing FG tv_weather_observation v1")
             n = insert_fg(fg_weather, df_weather, dedup_keys=["measurepoint_id", "sample_time"], wait=True)
             results["weather"] = n
         else:
@@ -171,6 +181,7 @@ def main():
                 description="Trafikverket situations (incidents/roadworks/etc).",
                 online_enabled=False,
             )
+            print("  Writing FG tv_situations v1")
             n = insert_fg(fg_sit, df_sit, dedup_keys=["situation_id", "version_time"], wait=True)
             results["situations"] = n
         else:
@@ -190,6 +201,7 @@ def main():
                 description="Trafikverket frost depth observations.",
                 online_enabled=False,
             )
+            print("  Writing FG tv_frostdepth_observation v1")
             n = insert_fg(fg_fd, df_fd, dedup_keys=["measurepoint_id", "sample_time", "depth_cm"], wait=True)
             results["frostdepth"] = n
         else:
@@ -202,12 +214,13 @@ def main():
         fg_fc = get_or_create_fg(
             fs,
             name="smhi_point_forecast",
-            version=1,
+            version=3,
             primary_key=["measurepoint_id", "forecast_run_time", "valid_time"],
             event_time="valid_time",
-            description="SMHI point forecast time series for measurement locations.",
+            description="SMHI point forecast time series (numeric measurepoint_id).",
             online_enabled=False,
         )
+        print("  Writing FG smhi_point_forecast v3")
         n = insert_fg(
             fg_fc,
             df_fc,

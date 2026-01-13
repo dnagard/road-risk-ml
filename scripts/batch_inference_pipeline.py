@@ -170,9 +170,47 @@ def attach_current_obs_features(fc_df: pd.DataFrame, obs_df: pd.DataFrame) -> pd
 
     assert fc_df["forecast_run_time"].dtype == obs_features["sample_time"].dtype
 
-    fc_df = fc_df.sort_values(["measurepoint_id", "forecast_run_time"]).reset_index(drop=True)
-    obs_features = obs_features.sort_values(["measurepoint_id", "sample_time"]).reset_index(drop=True)
-    print("  Sorted forecast and observation tables for merge_asof")
+    left_nat = int(fc_df["forecast_run_time"].isna().sum())
+    right_nat = int(obs_features["sample_time"].isna().sum())
+    if left_nat:
+        fc_df = fc_df[fc_df["forecast_run_time"].notna()].copy()
+    if right_nat:
+        obs_features = obs_features[obs_features["sample_time"].notna()].copy()
+
+    left_dupes = 0
+    if "valid_time" in fc_df.columns:
+        left_dupes = int(fc_df.duplicated(subset=["measurepoint_id", "forecast_run_time", "valid_time"]).sum())
+        if left_dupes:
+            fc_df = fc_df.drop_duplicates(subset=["measurepoint_id", "forecast_run_time", "valid_time"], keep="last")
+    right_dupes = int(obs_features.duplicated(subset=["measurepoint_id", "sample_time"]).sum())
+    if right_dupes:
+        obs_features = obs_features.drop_duplicates(subset=["measurepoint_id", "sample_time"], keep="last")
+
+    fc_df = fc_df.sort_values(["forecast_run_time", "measurepoint_id"]).reset_index(drop=True)
+    obs_features = obs_features.sort_values(["sample_time", "measurepoint_id"]).reset_index(drop=True)
+
+    left_mono = fc_df["forecast_run_time"].is_monotonic_increasing
+    right_mono = obs_features["sample_time"].is_monotonic_increasing
+    print(
+        "  Obs join prep:",
+        "left_sort=['forecast_run_time','measurepoint_id']",
+        "right_sort=['sample_time','measurepoint_id']",
+        f"left_monotonic={left_mono}",
+        f"right_monotonic={right_mono}",
+        f"left_nat_dropped={left_nat}",
+        f"right_nat_dropped={right_nat}",
+        f"left_dupes_dropped={left_dupes}",
+        f"right_dupes_dropped={right_dupes}",
+    )
+    if not left_mono or not right_mono:
+        print("  WARN: Non-monotonic join keys after sort; re-sorting")
+        fc_df = fc_df.sort_values(["forecast_run_time", "measurepoint_id"]).reset_index(drop=True)
+        obs_features = obs_features.sort_values(["sample_time", "measurepoint_id"]).reset_index(drop=True)
+        left_mono = fc_df["forecast_run_time"].is_monotonic_increasing
+        right_mono = obs_features["sample_time"].is_monotonic_increasing
+
+    assert left_mono
+    assert right_mono
 
     merged = pd.merge_asof(
         fc_df,

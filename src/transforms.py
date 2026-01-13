@@ -43,6 +43,7 @@ def extract_weather_observations(payload: Dict[str, Any]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["sample_time"] = _to_ts(df["sample_time"])
+        df["measurepoint_id"] = pd.to_numeric(df["measurepoint_id"], errors="coerce").astype("Int64")
     return df
 
 def extract_situations(payload: Dict[str, Any]) -> pd.DataFrame:
@@ -106,13 +107,14 @@ def extract_frostdepth_observations(payload: Dict[str, Any]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["sample_time"] = _to_ts(df["sample_time"])
+        df["measurepoint_id"] = pd.to_numeric(df["measurepoint_id"], errors="coerce").astype("Int64")
     return df
 
 def extract_smhi_point_forecast(
     payload: Dict[str, Any],
     lat: float,
     lon: float,
-    measurepoint_id: str | None = None,
+    measurepoint_id: int | str | None = None,
 ) -> pd.DataFrame:
     run_time_raw = payload.get("approvedTime") or payload.get("referenceTime")
     run_time = pd.to_datetime(run_time_raw, utc=True, errors="coerce")
@@ -120,6 +122,12 @@ def extract_smhi_point_forecast(
         forecast_run_time = _utc_now_naive()
     else:
         forecast_run_time = run_time.tz_convert(None)
+
+    if measurepoint_id is not None:
+        try:
+            measurepoint_id = int(measurepoint_id)
+        except (TypeError, ValueError):
+            pass
 
     rows: List[dict] = []
     for ts in payload.get("timeSeries", []) or []:
@@ -140,4 +148,5 @@ def extract_smhi_point_forecast(
     df = pd.DataFrame(rows)
     if not df.empty:
         df["valid_time"] = _to_ts(df["valid_time"])
+        df["measurepoint_id"] = pd.to_numeric(df["measurepoint_id"], errors="coerce").astype("Int64")
     return df
