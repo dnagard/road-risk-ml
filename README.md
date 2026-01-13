@@ -255,19 +255,6 @@ Configure these secrets in your repository:
 
 ## Development
 
-### Running Tests
-
-```bash
-uv run pytest
-```
-
-### Code Style
-
-```bash
-uv run ruff check .
-uv run ruff format .
-```
-
 ## Future Enhancements
 
 - [ ] Add more measurement points across Sweden
