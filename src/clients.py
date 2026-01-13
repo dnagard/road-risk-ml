@@ -58,7 +58,7 @@ class SMHIForecastClient:
 
     def get_point_forecast(self, lat: float, lon: float) -> Dict[str, Any]:
         url = (
-            "https://opendata-download.smhi.se/api/category/pmp3g/version/2/"
+            "https://opendata-download-metfcst.smhi.se/api/category/pmp3g/version/2/"
             f"geotype/point/lon/{lon}/lat/{lat}/data.json"
         )
         r = self.session.get(url, timeout=60)
