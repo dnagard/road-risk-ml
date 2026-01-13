@@ -134,9 +134,9 @@ Training artifacts are saved to `road_risk_models/road_risk_xgb_h24`, `road_risk
 ### Daily Operations
 
 The system is designed to run automatically via GitHub Actions:
-- **Daily (05:00 UTC)**: Feature pipeline + batch inference
-- **Weekly (Sunday 02:00 UTC)**: Model retraining
+- **Daily (05:00 UTC)**: Feature pipeline + batch inference [![Daily Feature Pipeline](https://github.com/dnagard/road-risk-ml/actions/workflows/daily-pipeline.yml/badge.svg)](https://github.com/dnagard/road-risk-ml/actions/workflows/daily-pipeline.yml)
 
+- **Weekly (Sunday 02:00 UTC)**: Model retraining [![Weekly Model Training](https://github.com/dnagard/road-risk-ml/actions/workflows/weekly-training.yml/badge.svg)](https://github.com/dnagard/road-risk-ml/actions/workflows/weekly-training.yml)
 ## Model
 
 ### Features (Forecast + Current Observations)
