@@ -36,7 +36,7 @@ jobs:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT: ${{ secrets.HOPSWORKS_PROJECT }}
           TRAFIKVERKET_API_KEY: ${{ secrets.TRAFIKVERKET_API_KEY }}
-        run: uv run -m python scripts/daily_feature_pipeline.py
+        run: uv run python -m scripts/daily_feature_pipeline.py
 
   batch-inference:
     runs-on: ubuntu-latest
@@ -64,4 +64,4 @@ jobs:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT: ${{ secrets.HOPSWORKS_PROJECT }}
           TRAFIKVERKET_API_KEY: ${{ secrets.TRAFIKVERKET_API_KEY }}
-        run: uv run -m python scripts/batch_inference_pipeline.py
+        run: uv run python -m scripts/batch_inference_pipeline.py
