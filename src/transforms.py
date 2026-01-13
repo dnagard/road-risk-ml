@@ -108,13 +108,27 @@ def extract_frostdepth_observations(payload: Dict[str, Any]) -> pd.DataFrame:
         df["sample_time"] = _to_ts(df["sample_time"])
     return df
 
-def extract_smhi_point_forecast(payload: Dict[str, Any], lat: float, lon: float) -> pd.DataFrame:
+def extract_smhi_point_forecast(
+    payload: Dict[str, Any],
+    lat: float,
+    lon: float,
+    measurepoint_id: str | None = None,
+) -> pd.DataFrame:
+    run_time_raw = payload.get("approvedTime") or payload.get("referenceTime")
+    run_time = pd.to_datetime(run_time_raw, utc=True, errors="coerce")
+    if pd.isna(run_time):
+        forecast_run_time = _utc_now_naive()
+    else:
+        forecast_run_time = run_time.tz_convert(None)
+
     rows: List[dict] = []
     for ts in payload.get("timeSeries", []) or []:
         params = {p["name"]: (p.get("values") or [None])[0] for p in ts.get("parameters", [])}
         rows.append({
+            "measurepoint_id": measurepoint_id,
             "lat": lat,
             "lon": lon,
+            "forecast_run_time": forecast_run_time,
             "valid_time": ts.get("validTime"),
             "t_air_c": params.get("t"),
             "precip_mm": params.get("pmean"),

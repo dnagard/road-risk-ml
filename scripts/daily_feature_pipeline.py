@@ -93,8 +93,7 @@ def fetch_smhi_forecasts(smhi: SMHIForecastClient, locations: dict) -> tuple:
         lon = loc_info["longitude"]
         try:
             payload = smhi.get_point_forecast(lat, lon)
-            df = extract_smhi_point_forecast(payload, lat, lon)
-            df["location_id"] = loc_id
+            df = extract_smhi_point_forecast(payload, lat, lon, measurepoint_id=loc_id)
             all_dfs.append(df)
             print(f"  ✓ {loc_info['name']}: {len(df)} forecast hours")
         except Exception as e:
@@ -116,8 +115,16 @@ def main():
     locations = load_locations()
     print(f"Loaded {len(locations)} measurement points")
 
+    if not settings.hopsworks_api_key or not settings.hopsworks_project:
+        print("Missing HOPSWORKS_API_KEY/HOPSWORKS_PROJECT; exiting.")
+        sys.exit(1)
+
+    tv_enabled = bool(settings.trafikverket_api_key)
+    if not tv_enabled:
+        print("Missing TRAFIKVERKET_API_KEY; skipping Trafikverket fetches.")
+
     # Initialize clients
-    tv = TrafikverketClient(settings.trafikverket_api_key, settings.trafikverket_url)
+    tv = TrafikverketClient(settings.trafikverket_api_key, settings.trafikverket_url) if tv_enabled else None
     smhi = SMHIForecastClient()
 
     # Connect to feature store
@@ -133,58 +140,61 @@ def main():
     errors = []
 
     # --- 1) Trafikverket WeatherObservation ---
-    df_weather, err = fetch_trafikverket_weather(tv)
-    if df_weather is not None and not df_weather.empty:
-        fg_weather = get_or_create_fg(
-            fs,
-            name="tv_weather_observation",
-            version=1,
-            primary_key=["measurepoint_id", "sample_time"],
-            event_time="sample_time",
-            description="Trafikverket road weather observations (rolling retention).",
-            online_enabled=False,
-        )
-        n = insert_fg(fg_weather, df_weather, dedup_keys=["measurepoint_id", "sample_time"], wait=True)
-        results["weather"] = n
-    else:
-        if err:
-            errors.append(f"weather: {err}")
+    if tv_enabled:
+        df_weather, err = fetch_trafikverket_weather(tv)
+        if df_weather is not None and not df_weather.empty:
+            fg_weather = get_or_create_fg(
+                fs,
+                name="tv_weather_observation",
+                version=1,
+                primary_key=["measurepoint_id", "sample_time"],
+                event_time="sample_time",
+                description="Trafikverket road weather observations (rolling retention).",
+                online_enabled=False,
+            )
+            n = insert_fg(fg_weather, df_weather, dedup_keys=["measurepoint_id", "sample_time"], wait=True)
+            results["weather"] = n
+        else:
+            if err:
+                errors.append(f"weather: {err}")
 
     # --- 2) Trafikverket Situations ---
-    df_sit, err = fetch_trafikverket_situations(tv)
-    if df_sit is not None and not df_sit.empty:
-        fg_sit = get_or_create_fg(
-            fs,
-            name="tv_situations",
-            version=1,
-            primary_key=["situation_id", "version_time"],
-            event_time="version_time",
-            description="Trafikverket situations (incidents/roadworks/etc).",
-            online_enabled=False,
-        )
-        n = insert_fg(fg_sit, df_sit, dedup_keys=["situation_id", "version_time"], wait=True)
-        results["situations"] = n
-    else:
-        if err:
-            errors.append(f"situations: {err}")
+    if tv_enabled:
+        df_sit, err = fetch_trafikverket_situations(tv)
+        if df_sit is not None and not df_sit.empty:
+            fg_sit = get_or_create_fg(
+                fs,
+                name="tv_situations",
+                version=1,
+                primary_key=["situation_id", "version_time"],
+                event_time="version_time",
+                description="Trafikverket situations (incidents/roadworks/etc).",
+                online_enabled=False,
+            )
+            n = insert_fg(fg_sit, df_sit, dedup_keys=["situation_id", "version_time"], wait=True)
+            results["situations"] = n
+        else:
+            if err:
+                errors.append(f"situations: {err}")
 
     # --- 3) Trafikverket FrostDepthObservation ---
-    df_fd, err = fetch_trafikverket_frostdepth(tv)
-    if df_fd is not None and not df_fd.empty:
-        fg_fd = get_or_create_fg(
-            fs,
-            name="tv_frostdepth_observation",
-            version=1,
-            primary_key=["measurepoint_id", "sample_time", "depth_cm"],
-            event_time="sample_time",
-            description="Trafikverket frost depth observations.",
-            online_enabled=False,
-        )
-        n = insert_fg(fg_fd, df_fd, dedup_keys=["measurepoint_id", "sample_time", "depth_cm"], wait=True)
-        results["frostdepth"] = n
-    else:
-        if err:
-            errors.append(f"frostdepth: {err}")
+    if tv_enabled:
+        df_fd, err = fetch_trafikverket_frostdepth(tv)
+        if df_fd is not None and not df_fd.empty:
+            fg_fd = get_or_create_fg(
+                fs,
+                name="tv_frostdepth_observation",
+                version=1,
+                primary_key=["measurepoint_id", "sample_time", "depth_cm"],
+                event_time="sample_time",
+                description="Trafikverket frost depth observations.",
+                online_enabled=False,
+            )
+            n = insert_fg(fg_fd, df_fd, dedup_keys=["measurepoint_id", "sample_time", "depth_cm"], wait=True)
+            results["frostdepth"] = n
+        else:
+            if err:
+                errors.append(f"frostdepth: {err}")
 
     # --- 4) SMHI point forecasts for all locations ---
     df_fc, errs = fetch_smhi_forecasts(smhi, locations)
@@ -193,12 +203,17 @@ def main():
             fs,
             name="smhi_point_forecast",
             version=1,
-            primary_key=["lat", "lon", "valid_time"],
+            primary_key=["measurepoint_id", "forecast_run_time", "valid_time"],
             event_time="valid_time",
             description="SMHI point forecast time series for measurement locations.",
             online_enabled=False,
         )
-        n = insert_fg(fg_fc, df_fc, dedup_keys=["lat", "lon", "valid_time"], wait=True)
+        n = insert_fg(
+            fg_fc,
+            df_fc,
+            dedup_keys=["measurepoint_id", "forecast_run_time", "valid_time"],
+            wait=True,
+        )
         results["forecast"] = n
     else:
         if errs:

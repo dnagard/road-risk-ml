@@ -7,8 +7,8 @@ A machine learning system for predicting hazardous road conditions on Stockholm 
 This project implements a serverless ML pipeline that:
 - Collects real-time road weather data from **Trafikverket** (Swedish Transport Administration)
 - Integrates weather forecasts from **SMHI** (Swedish Meteorological and Hydrological Institute)
-- Trains an XGBoost classifier to predict hazardous conditions (ice, snow, low grip)
-- Generates 24-hour predictions and maintenance recommendations
+- Trains calibrated XGBoost ensembles to forecast hazardous conditions 24/48/72 hours ahead
+- Generates probabilistic predictions with uncertainty bands
 - Displays results in an interactive Streamlit dashboard
 
 ## Architecture
@@ -119,15 +119,17 @@ DEFAULT_LON=18.0686
 # 1. Initial backfill (populate feature store with historical data)
 uv run python scripts/backfill_feature_pipeline.py
 
-# 2. Train the model
+# 2. Train the models (24/48/72h horizons)
 uv run python scripts/training_pipeline.py
 
-# 3. Generate predictions
+# 3. Generate predictions (writes road_risk_predictions with risk_mean/P10/P90)
 uv run python scripts/batch_inference_pipeline.py
 
 # 4. Run the dashboard
 uv run streamlit run src/dashboard.py
 ```
+
+Training artifacts are saved to `road_risk_models/road_risk_xgb_h24`, `road_risk_models/road_risk_xgb_h48`, and `road_risk_models/road_risk_xgb_h72`. If Hopsworks credentials are configured, the models are also registered in the model registry.
 
 ### Daily Operations
 
@@ -137,28 +139,22 @@ The system is designed to run automatically via GitHub Actions:
 
 ## Model
 
-### Features
+### Features (Forecast-Based)
 
 **Numeric Features:**
-- `surface_temp_c`: Road surface temperature
-- `air_temp_c`: Air temperature
-- `air_rh`: Relative humidity
-- `dewpoint_c`: Dewpoint temperature
-- `surface_grip`: Road grip coefficient (0-1)
+- `t_air_c`: Air temperature (SMHI forecast)
+- `precip_mm`: Mean precipitation (SMHI forecast)
+- `wind_ms`: Wind speed (SMHI forecast)
+- `rh`: Relative humidity (SMHI forecast)
+- `lat`, `lon`: Measurement point coordinates
 
 **Temporal Features:**
-- `hour`: Hour of day (0-23)
-- `day_of_week`: Day of week (0-6)
-- `month`: Month (1-12)
-- `is_rush_hour`: Rush hour indicator
-- `is_weekend`: Weekend indicator
-
-**Lagged Features:**
-- Previous 1h, 3h, 6h values for temperature and grip
+- `hour`, `day_of_week`, `month`
+- `is_rush_hour`, `is_weekend`
 
 ### Target Variable
 
-Binary classification: **Hazard** (1) vs **Safe** (0)
+Binary classification: **Hazard** (1) vs **Safe** (0) at `valid_time`
 
 A road segment is classified as hazardous if any of:
 - Surface temperature < 0°C (freezing)
@@ -168,14 +164,33 @@ A road segment is classified as hazardous if any of:
 
 ### Algorithm
 
-XGBoost classifier with class imbalance handling (`scale_pos_weight`)
+Per-horizon XGBoost ensembles with class imbalance handling (`scale_pos_weight`) and Platt calibration.
+Uncertainty intervals (P10/P90) come from the ensemble distribution.
+
+## Data Contract
+
+### tv_weather_observation (v1)
+- Primary keys: `measurepoint_id`, `sample_time`
+- Event time: `sample_time`
+- Core schema: `measurepoint_id`, `sample_time`, `surface_temp_c`, `surface_ice`, `surface_snow`, `surface_grip`, `air_temp_c`, `air_rh`, `dewpoint_c`, `ingested_at`
+
+### smhi_point_forecast (v1)
+- Primary keys: `measurepoint_id`, `forecast_run_time`, `valid_time`
+- Event time: `valid_time`
+- Core schema: `measurepoint_id`, `forecast_run_time` (SMHI approvedTime), `valid_time`, `t_air_c`, `precip_mm`, `wind_ms`, `rh`, `lat`, `lon`, `ingested_at`
+
+### road_risk_predictions (v1)
+- Primary keys: `measurepoint_id`, `forecast_run_time`, `valid_time`, `horizon_hours`
+- Event time: `valid_time`
+- Core schema: `measurepoint_id`, `forecast_run_time`, `valid_time`, `horizon_hours`, `risk_mean`, `risk_p10`, `risk_p90`, `hazard_predicted`, `recommendation`
 
 ## Dashboard
 
 The Streamlit dashboard provides:
 
 - **Risk Map**: Interactive map showing current risk levels
-- **Timeline**: 24-hour forecast for each road segment
+- **Timeline**: 72-hour forecast with uncertainty bands (P10-P90)
+- **Horizon Filter**: Toggle 24/48/72 hour forecasts
 - **Recommendations**: Maintenance action suggestions
 - **Metrics**: Summary statistics
 
