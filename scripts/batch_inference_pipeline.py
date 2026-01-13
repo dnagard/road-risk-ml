@@ -542,7 +542,7 @@ def main():
             predictions_fg = get_or_create_fg(
                 fs,
                 name="road_risk_predictions",
-                version=3,
+                version=4,
                 primary_key=["measurepoint_id", "forecast_run_time", "valid_time", "horizon_hours"],
                 event_time="valid_time",
                 description="Road hazard forecasts for 24/48/72h horizons (numeric measurepoint_id).",

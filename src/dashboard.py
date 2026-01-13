@@ -1,5 +1,6 @@
 """Road Risk ML - Streamlit Dashboard"""
 from datetime import datetime, timedelta
+import os
 from pathlib import Path
 import json
 import hopsworks
@@ -13,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     hopsworks_api_key: str = ""
     hopsworks_project: str = ""
-    hopsworks_host: str = "c.app.hopsworks.ai"
+    hopsworks_host: str = "eu-west.cloud.hopsworks.ai"
     model_config = SettingsConfigDict(env_file=".env", extra='ignore')
 
 
@@ -79,7 +80,7 @@ def load_predictions():
             project=settings.hopsworks_project if settings.hopsworks_project else None,
         )
         fs = project.get_feature_store()
-        pred_fg = fs.get_feature_group(name="road_risk_predictions", version=3)
+        pred_fg = fs.get_feature_group(name="road_risk_predictions", version=4)
         df = pred_fg.read()
     except Exception:
         return create_demo_predictions()
@@ -210,6 +211,78 @@ def create_timeline(pred_df, mp_id):
     return fig
 
 
+def prepare_recommendations(pred_df: pd.DataFrame) -> pd.DataFrame:
+    recs_df = pred_df.copy()
+    if recs_df.empty:
+        return recs_df
+
+    dedupe_candidates = [
+        "measurepoint_id",
+        "road_name",
+        "name",
+        "measurepoint_name",
+        "location",
+    ]
+    dedupe_col = next((col for col in dedupe_candidates if col in recs_df.columns), None)
+
+    time_candidates = [
+        "valid_time",
+        "prediction_time",
+        "event_time",
+        "timestamp",
+        "time",
+        "forecast_run_time",
+    ]
+    time_col = next((col for col in time_candidates if col in recs_df.columns), None)
+
+    score_candidates = [
+        "risk_mean",
+        "risk_probability",
+        "probability",
+        "score",
+    ]
+    score_col = next((col for col in score_candidates if col in recs_df.columns), None)
+
+    before_count = len(recs_df)
+    if dedupe_col:
+        sort_cols = [dedupe_col]
+        ascending = [True]
+        if time_col:
+            sort_cols.append(time_col)
+            ascending.append(False)
+        if score_col:
+            sort_cols.append(score_col)
+            ascending.append(False)
+        recs_df = recs_df.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+        recs_df = recs_df.drop_duplicates(subset=[dedupe_col], keep="first")
+    after_count = len(recs_df)
+
+    if os.getenv("DASH_DEBUG_RECS") == "1":
+        print(
+            "Recommendations dedupe: "
+            f"before={before_count}, after={after_count}, removed={before_count - after_count}"
+        )
+
+    if "risk_mean" in recs_df.columns:
+        risk = recs_df["risk_mean"].fillna(-1)
+        severity = np.select([risk > 0.7, risk > 0.4], [2, 1], default=0)
+    elif "risk_level" in recs_df.columns:
+        severity = recs_df["risk_level"].map({"HIGH": 2, "MEDIUM": 1, "LOW": 0}).fillna(0)
+    else:
+        severity = pd.Series(0, index=recs_df.index)
+
+    recs_df = recs_df.assign(_severity=severity)
+    sort_cols = ["_severity"]
+    ascending = [False]
+    if score_col:
+        sort_cols.append(score_col)
+        ascending.append(False)
+    recs_df = recs_df.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    recs_df = recs_df.drop(columns=["_severity"])
+
+    return recs_df
+
+
 def main():
     st.set_page_config(page_title="Road Risk Dashboard", page_icon="🚗", layout="wide")
     st.title("🚗 Road Risk Forecast - Stockholm")
@@ -237,7 +310,8 @@ def main():
     st.plotly_chart(create_risk_map(filtered_df), use_container_width=True)
 
     st.subheader("📋 Recommendations")
-    for _, row in filtered_df.sort_values("risk_mean", ascending=False).iterrows():
+    recs_df = prepare_recommendations(filtered_df)
+    for _, row in recs_df.iterrows():
         mp_name = MEASUREPOINTS.get(row["measurepoint_id"], {}).get("name", row["measurepoint_id"])
         color = get_risk_color(row["risk_mean"])
         st.markdown(
